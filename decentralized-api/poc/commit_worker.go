@@ -251,20 +251,6 @@ func (w *CommitWorker) maybeSubmitObservation(pocHeight int64) {
 }
 
 func (w *CommitWorker) maybeSubmitConsensusCommit(pocHeight int64) {
-	if !w.propagationEnabled {
-		store, err := w.store.GetStore(pocHeight)
-		if err != nil || store == nil {
-			return
-		}
-		count, rootHash := store.GetFlushedRoot()
-		if count == 0 || rootHash == nil {
-			return
-		}
-		logging.Warn("CommitWorker: propagation disabled, skipping commit", types.PoC,
-			"pocHeight", pocHeight, "count", count)
-		return
-	}
-
 	if w.consensusSubmitted[pocHeight] {
 		return
 	}
@@ -275,9 +261,32 @@ func (w *CommitWorker) maybeSubmitConsensusCommit(pocHeight int64) {
 		return
 	}
 
-	_, rootHash := store.GetFlushedRoot()
+	count, rootHash := store.GetFlushedRoot()
 	if rootHash == nil {
 		logging.Debug("CommitWorker: no flushed data", types.PoC, "pocHeight", pocHeight)
+		return
+	}
+
+	if !w.propagationEnabled {
+		if count == 0 {
+			return
+		}
+
+		msg := &inference.MsgPoCV2StoreCommit{
+			PocStageStartBlockHeight: pocHeight,
+			Count:                    count,
+			RootHash:                 rootHash,
+		}
+
+		if err := w.recorder.SubmitPoCV2StoreCommit(msg); err != nil {
+			logging.Warn("CommitWorker: local commit failed", types.PoC,
+				"pocHeight", pocHeight, "error", err)
+			return
+		}
+
+		w.consensusSubmitted[pocHeight] = true
+		logging.Info("CommitWorker: local count committed (propagation disabled)", types.PoC,
+			"pocHeight", pocHeight, "count", count)
 		return
 	}
 
@@ -303,10 +312,20 @@ func (w *CommitWorker) maybeSubmitConsensusCommit(pocHeight int64) {
 	}
 
 	if agreedCount > 0 {
+		commitRootHash := rootHash
+		if agreedCount != count {
+			commitRootHash, err = store.GetRootAt(agreedCount)
+			if err != nil {
+				logging.Warn("CommitWorker: failed to get root at consensus count", types.PoC,
+					"pocHeight", pocHeight, "agreedCount", agreedCount, "error", err)
+				return
+			}
+		}
+
 		msg := &inference.MsgPoCV2StoreCommit{
 			PocStageStartBlockHeight: pocHeight,
 			Count:                    agreedCount,
-			RootHash:                 rootHash,
+			RootHash:                 commitRootHash,
 		}
 
 		if err := w.recorder.SubmitPoCV2StoreCommit(msg); err != nil {
@@ -318,6 +337,14 @@ func (w *CommitWorker) maybeSubmitConsensusCommit(pocHeight int64) {
 		w.consensusSubmitted[pocHeight] = true
 		logging.Info("CommitWorker: consensus committed", types.PoC,
 			"pocHeight", pocHeight, "agreedCount", agreedCount)
+
+		if w.propagationEnabled && w.bundler != nil && agreedCount != count {
+			newBundleID := propagation.MakeBundleID(w.participantAddress, pocHeight, commitRootHash, agreedCount)
+			if err := w.publishProofsViaPropagation(store, newBundleID, agreedCount); err != nil {
+				logging.Warn("CommitWorker: failed to re-publish proofs at consensus count", types.PoC,
+					"pocHeight", pocHeight, "agreedCount", agreedCount, "error", err)
+			}
+		}
 		return
 	}
 

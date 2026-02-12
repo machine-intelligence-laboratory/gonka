@@ -1,6 +1,7 @@
 package poc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"decentralized-api/chainphase"
 	"decentralized-api/cosmosclient"
 	"decentralized-api/poc/artifacts"
+	"decentralized-api/poc/propagation"
 
 	"github.com/productscience/inference/api/inference/inference"
 	"github.com/productscience/inference/x/inference/types"
@@ -168,6 +170,254 @@ func TestCommitWorker_MaybeSubmitConsensusCommit_SkipsUnchanged(t *testing.T) {
 	)
 	mockRecorder.On("NewInferenceQueryClient").Return(mockQueryClient)
 	mockRecorder.On("SubmitPoCV2StoreCommit", mock.AnythingOfType("*inference.MsgPoCV2StoreCommit")).Return(nil).Once()
+
+	worker.maybeSubmitConsensusCommit(pocHeight)
+	mockRecorder.AssertExpectations(t)
+
+	worker.maybeSubmitConsensusCommit(pocHeight)
+	mockRecorder.AssertExpectations(t)
+}
+
+func TestCommitWorker_MaybeSubmitConsensusCommit_ConsensusCountLowerThanLocal(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "commit_worker_test")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	store := artifacts.NewManagedArtifactStore(tmpDir, 5)
+	defer store.Close()
+
+	mockRecorder := &cosmosclient.MockCosmosMessageClient{}
+
+	worker := &CommitWorker{
+		store:                store,
+		recorder:             mockRecorder,
+		participantAddress:   "test_addr",
+		lastCommitted:        make(map[int64]commitState),
+		observationSubmitted: make(map[int64]bool),
+		consensusSubmitted:   make(map[int64]bool),
+		propagationEnabled:   true,
+	}
+
+	pocHeight := int64(100)
+
+	artifactStore, err := store.GetOrCreateStore(pocHeight)
+	assert.NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		err = artifactStore.AddWithNode(int32(i), []byte(fmt.Sprintf("vector-%d", i)), "node-1")
+		assert.NoError(t, err)
+	}
+	err = artifactStore.Flush()
+	assert.NoError(t, err)
+
+	fullCount, fullRootHash := artifactStore.GetFlushedRoot()
+	assert.Equal(t, uint32(5), fullCount)
+	assert.NotNil(t, fullRootHash)
+
+	consensusCount := uint32(3)
+	expectedRootHash, err := artifactStore.GetRootAt(consensusCount)
+	assert.NoError(t, err)
+	assert.NotEqual(t, fullRootHash, expectedRootHash)
+
+	mockQueryClient := &mockInferenceQueryClient{}
+	mockQueryClient.On("PoCConsensus", mock.Anything, mock.AnythingOfType("*types.QueryPoCConsensusRequest")).Return(
+		&types.QueryPoCConsensusResponse{
+			Entries: []*types.PoCConsensusEntry{
+				{
+					Participant:     "test_addr",
+					AgreedCount:     consensusCount,
+					TotalValidators: 3,
+					AgreeingCount:   2,
+				},
+			},
+		}, nil,
+	)
+	mockRecorder.On("NewInferenceQueryClient").Return(mockQueryClient)
+	mockRecorder.On("SubmitPoCV2StoreCommit", mock.MatchedBy(func(msg *inference.MsgPoCV2StoreCommit) bool {
+		return msg.PocStageStartBlockHeight == pocHeight &&
+			msg.Count == consensusCount &&
+			bytes.Equal(msg.RootHash, expectedRootHash)
+	})).Return(nil).Once()
+
+	worker.maybeSubmitConsensusCommit(pocHeight)
+	mockRecorder.AssertExpectations(t)
+
+	assert.True(t, worker.consensusSubmitted[pocHeight])
+}
+
+func TestCommitWorker_MaybeSubmitConsensusCommit_RepublishesProofsAtConsensusCount(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "commit_worker_test")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	store := artifacts.NewManagedArtifactStore(tmpDir, 5)
+	defer store.Close()
+
+	mockRecorder := &cosmosclient.MockCosmosMessageClient{}
+
+	cacheDir, err := os.MkdirTemp("", "commit_worker_cache")
+	assert.NoError(t, err)
+	defer os.RemoveAll(cacheDir)
+
+	fileStorage, err := propagation.NewFileBundleStorage(cacheDir)
+	assert.NoError(t, err)
+	cache := propagation.NewCache(fileStorage)
+	mockTransport := propagation.NewMockTransport()
+	bundler := propagation.NewBundler(nil, cache, nil, mockTransport.NewSenderFor("test_addr"), "test_addr")
+
+	worker := &CommitWorker{
+		store:                store,
+		recorder:             mockRecorder,
+		participantAddress:   "test_addr",
+		lastCommitted:        make(map[int64]commitState),
+		observationSubmitted: make(map[int64]bool),
+		consensusSubmitted:   make(map[int64]bool),
+		propagationEnabled:   true,
+		bundler:              bundler,
+		propagationCache:     cache,
+	}
+
+	pocHeight := int64(100)
+
+	artifactStore, err := store.GetOrCreateStore(pocHeight)
+	assert.NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		err = artifactStore.AddWithNode(int32(i), []byte(fmt.Sprintf("vector-%d", i)), "node-1")
+		assert.NoError(t, err)
+	}
+	err = artifactStore.Flush()
+	assert.NoError(t, err)
+
+	fullCount, _ := artifactStore.GetFlushedRoot()
+	assert.Equal(t, uint32(5), fullCount)
+
+	consensusCount := uint32(3)
+	expectedRootHash, err := artifactStore.GetRootAt(consensusCount)
+	assert.NoError(t, err)
+
+	mockQueryClient := &mockInferenceQueryClient{}
+	mockQueryClient.On("PoCConsensus", mock.Anything, mock.AnythingOfType("*types.QueryPoCConsensusRequest")).Return(
+		&types.QueryPoCConsensusResponse{
+			Entries: []*types.PoCConsensusEntry{
+				{
+					Participant:     "test_addr",
+					AgreedCount:     consensusCount,
+					TotalValidators: 3,
+					AgreeingCount:   2,
+				},
+			},
+		}, nil,
+	)
+	mockRecorder.On("NewInferenceQueryClient").Return(mockQueryClient)
+	mockRecorder.On("SubmitPoCV2StoreCommit", mock.MatchedBy(func(msg *inference.MsgPoCV2StoreCommit) bool {
+		return msg.Count == consensusCount && bytes.Equal(msg.RootHash, expectedRootHash)
+	})).Return(nil).Once()
+
+	worker.maybeSubmitConsensusCommit(pocHeight)
+	mockRecorder.AssertExpectations(t)
+
+	consensusBundleID := propagation.MakeBundleID("test_addr", pocHeight, expectedRootHash, consensusCount)
+	cachedProofs, err := cache.GetProofs(consensusBundleID)
+	assert.NoError(t, err)
+	assert.Equal(t, int(consensusCount), len(cachedProofs))
+}
+
+func TestCommitWorker_MaybeSubmitConsensusCommit_ConsensusCountHigherThanLocal(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "commit_worker_test")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	store := artifacts.NewManagedArtifactStore(tmpDir, 5)
+	defer store.Close()
+
+	mockRecorder := &cosmosclient.MockCosmosMessageClient{}
+
+	worker := &CommitWorker{
+		store:                store,
+		recorder:             mockRecorder,
+		participantAddress:   "test_addr",
+		lastCommitted:        make(map[int64]commitState),
+		observationSubmitted: make(map[int64]bool),
+		consensusSubmitted:   make(map[int64]bool),
+		propagationEnabled:   true,
+	}
+
+	pocHeight := int64(100)
+
+	artifactStore, err := store.GetOrCreateStore(pocHeight)
+	assert.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		err = artifactStore.AddWithNode(int32(i), []byte(fmt.Sprintf("vector-%d", i)), "node-1")
+		assert.NoError(t, err)
+	}
+	err = artifactStore.Flush()
+	assert.NoError(t, err)
+
+	fullCount, _ := artifactStore.GetFlushedRoot()
+	assert.Equal(t, uint32(3), fullCount)
+
+	mockQueryClient := &mockInferenceQueryClient{}
+	mockQueryClient.On("PoCConsensus", mock.Anything, mock.AnythingOfType("*types.QueryPoCConsensusRequest")).Return(
+		&types.QueryPoCConsensusResponse{
+			Entries: []*types.PoCConsensusEntry{
+				{
+					Participant:     "test_addr",
+					AgreedCount:     10,
+					TotalValidators: 3,
+					AgreeingCount:   2,
+				},
+			},
+		}, nil,
+	)
+	mockRecorder.On("NewInferenceQueryClient").Return(mockQueryClient)
+
+	worker.maybeSubmitConsensusCommit(pocHeight)
+
+	mockRecorder.AssertNotCalled(t, "SubmitPoCV2StoreCommit", mock.Anything)
+	assert.False(t, worker.consensusSubmitted[pocHeight])
+}
+
+func TestCommitWorker_MaybeSubmitConsensusCommit_PropagationDisabled(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "commit_worker_test")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	store := artifacts.NewManagedArtifactStore(tmpDir, 5)
+	defer store.Close()
+
+	mockRecorder := &cosmosclient.MockCosmosMessageClient{}
+
+	worker := &CommitWorker{
+		store:                store,
+		recorder:             mockRecorder,
+		participantAddress:   "test_addr",
+		lastCommitted:        make(map[int64]commitState),
+		observationSubmitted: make(map[int64]bool),
+		consensusSubmitted:   make(map[int64]bool),
+		propagationEnabled:   false,
+	}
+
+	pocHeight := int64(100)
+
+	artifactStore, err := store.GetOrCreateStore(pocHeight)
+	assert.NoError(t, err)
+
+	err = artifactStore.AddWithNode(1, []byte("test-vector"), "node-1")
+	assert.NoError(t, err)
+	err = artifactStore.Flush()
+	assert.NoError(t, err)
+
+	count, rootHash := artifactStore.GetFlushedRoot()
+	assert.True(t, count > 0)
+	assert.NotNil(t, rootHash)
+
+	mockRecorder.On("SubmitPoCV2StoreCommit", mock.MatchedBy(func(msg *inference.MsgPoCV2StoreCommit) bool {
+		return msg.PocStageStartBlockHeight == pocHeight &&
+			msg.Count == count &&
+			bytes.Equal(msg.RootHash, rootHash)
+	})).Return(nil).Once()
 
 	worker.maybeSubmitConsensusCommit(pocHeight)
 	mockRecorder.AssertExpectations(t)
