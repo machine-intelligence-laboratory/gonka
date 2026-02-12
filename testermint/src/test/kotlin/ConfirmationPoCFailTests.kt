@@ -64,7 +64,7 @@ class ConfirmationPoCFailTests : TestermintTest() {
         Logger.info("Confirmation PoC validation phase active")
 
         logSection("Waiting for confirmation PoC completion")
-        waitForConfirmationPoCCompletion(genesis)
+        waitForConfirmationPoCCompletion(genesis, triggerHeight = confirmationEvent.triggerHeight)
         Logger.info("Confirmation PoC completed (event cleared)")
         genesis.setPocWeight(10)
         join1.setPocWeight(10)
@@ -196,7 +196,7 @@ class ConfirmationPoCFailTests : TestermintTest() {
         Logger.info("Confirmation PoC validation phase active")
 
         logSection("Waiting for confirmation PoC completion")
-        waitForConfirmationPoCCompletion(genesis)
+        waitForConfirmationPoCCompletion(genesis, triggerHeight = confirmationEvent.triggerHeight)
         Logger.info("Confirmation PoC completed (event cleared)")
 
         // Reset mocks to full weight after confirmation

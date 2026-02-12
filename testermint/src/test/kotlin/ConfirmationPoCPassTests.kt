@@ -60,7 +60,7 @@ class ConfirmationPoCPassTests : TestermintTest() {
         Logger.info("Confirmation PoC validation phase active")
 
         logSection("Waiting for confirmation PoC completion")
-        waitForConfirmationPoCCompletion(genesis)
+        waitForConfirmationPoCCompletion(genesis, triggerHeight = confirmationEvent.triggerHeight)
         Logger.info("Confirmation PoC completed (event cleared)")
 
         logSection("Waiting for NEXT epoch where confirmation weights will be applied")

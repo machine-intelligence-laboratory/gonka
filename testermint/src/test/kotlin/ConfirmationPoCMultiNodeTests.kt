@@ -120,9 +120,9 @@ class ConfirmationPoCMultiNodeTests : TestermintTest() {
         Logger.info("Confirmation PoC validation phase active")
         
         logSection("Waiting for confirmation PoC completion")
-        waitForConfirmationPoCCompletion(genesis)
+        waitForConfirmationPoCCompletion(genesis, triggerHeight = confirmationEvent.triggerHeight)
         Logger.info("Confirmation PoC completed (event cleared)")
-        
+
         // Reset mocks to full weight after confirmation
         genesis.setPocWeight(10)
         join1.setPocWeight(50)
@@ -283,7 +283,7 @@ class ConfirmationPoCMultiNodeTests : TestermintTest() {
         Logger.info("Confirmation PoC validation phase active")
 
         logSection("Waiting for confirmation PoC completion")
-        waitForConfirmationPoCCompletion(genesis)
+        waitForConfirmationPoCCompletion(genesis, triggerHeight = confirmationEvent.triggerHeight)
         Logger.info("Confirmation PoC completed (event cleared)")
 
         // Reset mocks to full weight after confirmation
@@ -434,6 +434,7 @@ fun waitForConfirmationPoCPhase(
 
 fun waitForConfirmationPoCCompletion(
     pair: LocalInferencePair,
+    triggerHeight: Long? = null,
     maxBlocks: Int = 100
 ) {
     var attempts = 0
@@ -441,6 +442,15 @@ fun waitForConfirmationPoCCompletion(
         val epochData = pair.getEpochData()
         if (!epochData.isConfirmationPocActive) {
             return
+        }
+        if (triggerHeight != null) {
+            val event = epochData.activeConfirmationPocEvent
+            if (event != null && event.triggerHeight != triggerHeight) {
+                return
+            }
+            if (event != null && event.phase == ConfirmationPoCPhase.CONFIRMATION_POC_COMPLETED) {
+                return
+            }
         }
         pair.node.waitForNextBlock(2)
         attempts++
