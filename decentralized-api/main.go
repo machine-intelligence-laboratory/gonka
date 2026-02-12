@@ -121,21 +121,21 @@ func main() {
 		return
 	}
 
-	logging.Debug("Initializing PoC orchestrator",
+	logging.Debug("Initializing PoC off-chain validator",
 		types.PoC, "name", recorder.GetApiAccount().SignerAccount.Name,
 		"address", participantInfo.GetAddress(),
 		"pubkey", participantInfo.GetPubKey())
 
-	// Create v2 orchestrator for artifact-based PoC
-	pocOrchestrator := poc.NewOrchestrator(
-		participantInfo.GetPubKey(),
-		nodeBroker,
-		config.GetApiConfig().PoCCallbackUrl,
-		config.GetChainNodeConfig().Url,
+	offChainValidator := poc.NewOffChainValidator(
 		recorder,
+		nodeBroker,
 		chainPhaseTracker,
+		config.GetApiConfig().PoCCallbackUrl,
+		participantInfo.GetPubKey(),
+		config.GetChainNodeConfig().Url,
+		poc.DefaultValidationConfig(),
 	)
-	logging.Info("PoC orchestrator initialized", types.PoC)
+	logging.Info("PoC off-chain validator initialized", types.PoC)
 
 	tendermintClient := cosmosclient.TendermintClient{
 		ChainNodeUrl: config.GetChainNodeConfig().Url,
@@ -152,7 +152,7 @@ func main() {
 
 	validator := validation.NewInferenceValidator(nodeBroker, config, recorder, chainPhaseTracker)
 	blsManager := bls.NewBlsManager(*recorder)
-	listener := event_listener.NewEventListener(config, pocOrchestrator, nodeBroker, validator, *recorder, trainingExecutor, chainPhaseTracker, cancel, blsManager)
+	listener := event_listener.NewEventListener(config, offChainValidator, nodeBroker, validator, *recorder, trainingExecutor, chainPhaseTracker, cancel, blsManager)
 	// TODO: propagate trainingExecutor
 	go listener.Start(ctx)
 

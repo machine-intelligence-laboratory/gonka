@@ -48,11 +48,9 @@ var defaultReconciliationConfig = MlNodeReconciliationConfig{
 }
 
 // Mock implementations using minimal interfaces
-type MockNodePoCOrchestratorV2 struct{}
+type MockOffChainValidator struct{}
 
-func (m *MockNodePoCOrchestratorV2) ValidateReceivedArtifacts(pocStageStartBlockHeight int64, pocStartBlockHash string) {
-	// Mock implementation - does nothing
-}
+func (m *MockOffChainValidator) ValidateAll(pocStartBlockHeight int64, pocStartBlockHash string) {}
 
 type MockOrchestratorChainBridge struct {
 }
@@ -315,12 +313,11 @@ func createIntegrationTestSetup(reconcilialtionConfig *MlNodeReconciliationConfi
 	// Create dispatcher with mocked dependencies
 	mockValidator := &validation.InferenceValidator{}
 
-	// Create mock v2 orchestrator
-	mockV2Orchestrator := &MockNodePoCOrchestratorV2{}
+	mockOffChainValidator := &MockOffChainValidator{}
 
 	dispatcher := NewOnNewBlockDispatcher(
 		nodeBroker,
-		mockV2Orchestrator,
+		mockOffChainValidator,
 		mockQueryClient,
 		phaseTracker,
 		mockStatusFunc,
@@ -538,8 +535,8 @@ func TestInferenceReconciliation(t *testing.T) {
 
 	node1Client := setup.getNodeClient("node-1", 8081)
 	node2Client := setup.getNodeClient("node-2", 8082)
-	assertNodeClient(t, NodeClientAssertion{0, 0, 0, 0}, node1Client)
-	assertNodeClient(t, NodeClientAssertion{0, 0, 0, 0}, node2Client)
+	assertNodeClient(t, NodeClientAssertion{0, 0, 0}, node1Client)
+	assertNodeClient(t, NodeClientAssertion{0, 0, 0}, node2Client)
 
 	var i = int64(1)
 	for i <= int64(reconciliationConfig.Inference.BlockInterval) {
@@ -560,7 +557,7 @@ func TestInferenceReconciliation(t *testing.T) {
 		require.Equal(t, types.HardwareNodeStatus_INFERENCE, n.State.IntendedStatus)
 	})
 
-	expected := NodeClientAssertion{1, 0, 0, 1}
+	expected := NodeClientAssertion{1, 0, 1}
 	assertNodeClient(t, expected, node1Client)
 	assertNodeClient(t, expected, node2Client)
 
@@ -582,8 +579,8 @@ func TestRegularPocScenario(t *testing.T) {
 
 	node1Client := setup.getNodeClient("node-1", 8081)
 	node2Client := setup.getNodeClient("node-2", 8082)
-	assertNodeClient(t, NodeClientAssertion{0, 0, 0, 0}, node1Client)
-	assertNodeClient(t, NodeClientAssertion{0, 0, 0, 0}, node2Client)
+	assertNodeClient(t, NodeClientAssertion{0, 0, 0}, node1Client)
+	assertNodeClient(t, NodeClientAssertion{0, 0, 0}, node2Client)
 
 	var i int64 = 1
 	for i <= setup.EpochParams.EpochLength {
@@ -612,7 +609,7 @@ func TestRegularPocScenario(t *testing.T) {
 	})
 
 	// v2 doesn't call Stop() before PoC generation (unlike v1)
-	expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InitValidateCalled: 0, InferenceUpCalled: 1}
+	expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InferenceUpCalled: 1}
 	assertNodeClient(t, expected, node1Client)
 	assertNodeClient(t, expected, node2Client)
 
@@ -622,7 +619,7 @@ func TestRegularPocScenario(t *testing.T) {
 		require.NoError(t, err)
 
 		// Expect no new calls to ml node client
-		expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InitValidateCalled: 0, InferenceUpCalled: 1}
+		expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InferenceUpCalled: 1}
 		assertNodeClient(t, expected, node1Client)
 		assertNodeClient(t, expected, node2Client)
 		i++
@@ -638,7 +635,7 @@ func TestRegularPocScenario(t *testing.T) {
 			waitForAsync(300 * time.Millisecond)
 		}
 
-		expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InitValidateCalled: 0, InferenceUpCalled: 1}
+		expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InferenceUpCalled: 1}
 		assertNodeClient(t, expected, node1Client)
 		assertNodeClient(t, expected, node2Client)
 
@@ -651,7 +648,7 @@ func TestRegularPocScenario(t *testing.T) {
 	waitForAsync(300 * time.Millisecond)
 
 	// After PoC validation ends, nodes return to inference (+1 stop for inference transition)
-	expected = NodeClientAssertion{StopCalled: 2, InitGenerateV2Called: 1, InitValidateCalled: 0, InferenceUpCalled: 2}
+	expected = NodeClientAssertion{StopCalled: 2, InitGenerateV2Called: 1, InferenceUpCalled: 2}
 	assertNodeClient(t, expected, node1Client)
 	assertNodeClient(t, expected, node2Client)
 	setup.assertNode("node-1", func(n broker.NodeResponse) {
@@ -687,7 +684,7 @@ func TestNodeUpdateSwitchesPocAddresses(t *testing.T) {
 	waitForAsync(200 * time.Millisecond)
 	waitForNodeStatus(t, setup, nodeID, types.HardwareNodeStatus_INFERENCE, 2*time.Second)
 
-	assertNodeClient(t, NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 0, InitValidateCalled: 0, InferenceUpCalled: 1}, nodeClient)
+	assertNodeClient(t, NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 0, InferenceUpCalled: 1}, nodeClient)
 
 	nodes, err := setup.NodeBroker.GetNodes()
 	require.NoError(t, err)
@@ -747,7 +744,6 @@ func TestNodeUpdateSwitchesPocAddresses(t *testing.T) {
 type NodeClientAssertion struct {
 	StopCalled           int
 	InitGenerateV2Called int
-	InitValidateCalled   int
 	InferenceUpCalled    int
 }
 
@@ -760,7 +756,6 @@ func assertNodeClient(t *testing.T, expected NodeClientAssertion, nodeClient *ml
 	}
 
 	require.Equal(t, expected.InitGenerateV2Called, nodeClient.InitGenerateV2Called, "InitGenerateV2 was called. n = %d", nodeClient.InitGenerateV2Called)
-	require.Equal(t, expected.InitValidateCalled, nodeClient.InitValidateCalled, "InitValidate was called. n = %d", nodeClient.InitValidateCalled)
 	require.Equal(t, expected.InferenceUpCalled, nodeClient.InferenceUpCalled, "InferenceUp was called. n = %d", nodeClient.InferenceUpCalled)
 	require.Equal(t, expected.StopCalled, nodeClient.StopCalled, "Stop was called. n = %d", nodeClient.StopCalled)
 }
@@ -834,21 +829,19 @@ func TestNodeDisableScenario_Integration(t *testing.T) {
 	// Verify only node-2 received PoC start command, node-1 should be excluded
 	node1Client.WithTryLock(t, func() {
 		assert.Equal(t, 0, node1Client.InitGenerateV2Called, "Disabled node-1 should NOT receive InitGenerateV2 call")
-		assert.Equal(t, 0, node1Client.InitValidateCalled, "Disabled node-1 should NOT receive InitValidate call")
 	})
 	node2Client.WithTryLock(t, func() {
 		assert.Equal(t, 1, node2Client.InitGenerateV2Called, "Enabled node-2 should receive InitGenerateV2 call")
-		assert.Equal(t, 0, node2Client.InitValidateCalled, "Enabled node-2 should receive no InitValidate call")
 	})
 
-	node1Expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 0, InitValidateCalled: 0, InferenceUpCalled: 1}
+	node1Expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 0, InferenceUpCalled: 1}
 	assertNodeClient(t, node1Expected, node1Client)
 	setup.assertNode("node-1", func(n broker.NodeResponse) {
 		// Default state is inference
 		require.Equal(t, types.HardwareNodeStatus_INFERENCE, n.State.CurrentStatus)
 	})
 
-	node2Expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InitValidateCalled: 0, InferenceUpCalled: 1}
+	node2Expected := NodeClientAssertion{StopCalled: 1, InitGenerateV2Called: 1, InferenceUpCalled: 1}
 	assertNodeClient(t, node2Expected, node2Client)
 	setup.assertNode("node-2", func(n broker.NodeResponse) {
 		require.Equal(t, types.HardwareNodeStatus_INFERENCE, n.State.CurrentStatus)
@@ -953,8 +946,8 @@ func TestFullEpochTransitionWithPocCommands_Integration(t *testing.T) {
 	node1Client := setup.getNodeClient("node-1", 8081)
 	node2Client := setup.getNodeClient("node-2", 8082)
 
-	assertNodeClient(t, NodeClientAssertion{0, 0, 0, 0}, node1Client)
-	assertNodeClient(t, NodeClientAssertion{0, 0, 0, 0}, node2Client)
+	assertNodeClient(t, NodeClientAssertion{0, 0, 0}, node1Client)
+	assertNodeClient(t, NodeClientAssertion{0, 0, 0}, node2Client)
 
 	// Simulate PoC start (block 0)
 	setup.transitionChainStateToNextEpoch(100)
@@ -970,9 +963,6 @@ func TestFullEpochTransitionWithPocCommands_Integration(t *testing.T) {
 	err = setup.simulateBlock(120)
 	require.NoError(t, err)
 	waitForAsync(100 * time.Millisecond)
-
-	assert.Equal(t, node1Client.InitValidateCalled, 0, "Node-1 should receive no InitValidate call (v2 uses no-op)")
-	assert.Equal(t, node2Client.InitValidateCalled, 0, "Node-2 should receive no InitValidate call (v2 uses no-op)")
 
 	// Simulate PoC validation start (block 22)
 	err = setup.simulateBlock(122)
@@ -1036,8 +1026,8 @@ func TestPoCRetry(t *testing.T) {
 	waitForAsync(100 * time.Millisecond)
 
 	// v2: no error injection, so both nodes successfully start PoC
-	assertNodeClient(t, NodeClientAssertion{0, 1, 0, 0}, node1Client)
-	assertNodeClient(t, NodeClientAssertion{0, 1, 0, 0}, node2Client)
+	assertNodeClient(t, NodeClientAssertion{0, 1, 0}, node1Client)
+	assertNodeClient(t, NodeClientAssertion{0, 1, 0}, node2Client)
 	setup.assertNode("node-1", func(n broker.NodeResponse) {
 		require.Equal(t, types.HardwareNodeStatus_POC, n.State.CurrentStatus)
 	})
@@ -1056,8 +1046,8 @@ func TestPoCRetry(t *testing.T) {
 	waitForAsync(100 * time.Millisecond)
 
 	// v2: no errors injected, so no retry needed - still 1 call each
-	assertNodeClient(t, NodeClientAssertion{0, 1, 0, 0}, node1Client)
-	assertNodeClient(t, NodeClientAssertion{0, 1, 0, 0}, node2Client)
+	assertNodeClient(t, NodeClientAssertion{0, 1, 0}, node1Client)
+	assertNodeClient(t, NodeClientAssertion{0, 1, 0}, node2Client)
 	setup.assertNode("node-1", func(n broker.NodeResponse) {
 		require.Equal(t, types.HardwareNodeStatus_POC, n.State.CurrentStatus)
 	})
@@ -1076,8 +1066,8 @@ func TestPoCRetry(t *testing.T) {
 	}
 
 	// v2: no error injection means no retries - just 1 successful call per node
-	assertNodeClient(t, NodeClientAssertion{0, 1, 0, 0}, node1Client)
-	assertNodeClient(t, NodeClientAssertion{0, 1, 0, 0}, node2Client)
+	assertNodeClient(t, NodeClientAssertion{0, 1, 0}, node1Client)
+	assertNodeClient(t, NodeClientAssertion{0, 1, 0}, node2Client)
 	setup.assertNode("node-1", func(n broker.NodeResponse) {
 		require.Equal(t, types.HardwareNodeStatus_POC, n.State.CurrentStatus)
 		require.Equal(t, broker.PocStatusGenerating, n.State.PocCurrentStatus)
